@@ -87,20 +87,28 @@ private:
 public:
 #pragma region Constructors
 
+	/** 默认构造函数，启用组件复制并保持 Tick 关闭（纯事件驱动） */
 	USingularisSeatComponent();
 
 #pragma endregion
 
 #pragma region ActorComponent Interface
 
+	/** 解析 MountPoint 组件引用并缓存挂载点 */
 	virtual void BeginPlay() override;
+
+	/** 注册 Occupant 为复制属性 */
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 #pragma endregion
 
 #pragma region API
 
-	/** 座位是否被占用 */
+	/**
+	 * 座位是否被占用。
+	 *
+	 * @return 存在有效乘员时返回 true。
+	 */
 	UFUNCTION(
 		BlueprintPure,
 		Category = "引力奇点座位组件|API",
@@ -108,7 +116,11 @@ public:
 	)
 	bool Occupied() const { return Occupant.IsValid(); }
 
-	/** 获取当前占用座位的 Actor */
+	/**
+	 * 获取当前占用座位的 Actor。
+	 *
+	 * @return 当前乘员，无人入座时返回 nullptr。
+	 */
 	UFUNCTION(
 		BlueprintPure,
 		Category = "引力奇点座位组件|API",
@@ -119,7 +131,10 @@ public:
 	/**
 	 * 让指定 Actor 入座。
 	 *
-	 * 仅服务器权威有效；座位已被占用或入参非法时静默忽略。
+	 * 服务器权威操作。写入 Occupant 复制属性，由 ApplyOccupant 响应式应用附加与移动副作用，
+	 * 座位已被占用或入参非法时静默忽略。
+	 *
+	 * @param Actor 要入座的 Actor。
 	 */
 	UFUNCTION(
 		BlueprintCallable,
@@ -129,7 +144,12 @@ public:
 	)
 	void Sit(AActor* Actor);
 
-	/** 让当前乘员离座 */
+	/**
+	 * 让当前乘员离座。
+	 *
+	 * 服务器权威操作。清空 Occupant 复制属性，由 ApplyOccupant 响应式还原附加与移动，
+	 * 座位空闲时静默忽略。
+	 */
 	UFUNCTION(
 		BlueprintCallable,
 		BlueprintAuthorityOnly,
@@ -143,7 +163,13 @@ public:
 private:
 #pragma region Response
 
-	/** Occupant 复制回调 */
+	/**
+	 * Occupant 复制回调。
+	 *
+	 * 客户端收到复制值时调用 ApplyOccupant 应用附加与移动副作用。
+	 *
+	 * @param OldOccupant 复制前的旧乘员。
+	 */
 	UFUNCTION()
 	void OnRep_Occupant(TWeakObjectPtr<AActor> OldOccupant) const;
 
@@ -151,10 +177,23 @@ private:
 
 #pragma region Internal Function
 
-	/** 设置 Occupant 复制状态并应用副作用 */
+	/**
+	 * 设置 Occupant 复制属性并应用副作用。
+	 *
+	 * 服务器权威，幂等。先快照旧值，再赋值新值，最后调用 ApplyOccupant。
+	 *
+	 * @param Actor 新的乘员，传入 nullptr 表示离座。
+	 */
 	void SetOccupant(AActor* Actor);
 
-	/** 将占用状态变化应用到附加与移动表现 */
+	/**
+	 * 应用 Occupant 变化到附加与移动表现。
+	 *
+	 * 入座分支：关闭碰撞 → 冻结角色移动 → 附加到挂载点 → 广播 OnSeatOccupied。
+	 * 离座分支：分离 → 恢复碰撞 → 恢复移动 → 广播 OnSeatVacated。
+	 *
+	 * @param OldOccupant 变化前的旧乘员，用于离座分支的清理与广播。
+	 */
 	void ApplyOccupant(AActor* OldOccupant) const;
 
 #pragma endregion

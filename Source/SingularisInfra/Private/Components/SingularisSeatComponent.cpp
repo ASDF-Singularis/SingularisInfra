@@ -20,6 +20,7 @@ void USingularisSeatComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// 1) 缓存挂载点
 	if (AActor* Owner = GetOwner())
 		CachedMountPoint = Cast<USceneComponent>(MountPoint.GetComponent(Owner));
 }
@@ -55,15 +56,14 @@ void USingularisSeatComponent::SetOccupant(AActor* Actor)
 	// 1) 服务器权威检查
 	if (!IsValid(GetOwner()) || !GetOwner()->HasAuthority()) return;
 
-	// 2) 幂等性
+	// 2) 幂等性检查，若状态未变更则直接返回
 	if (Actor == Occupant) return;
 
-	// 3) 设置复制副作用状态
+	// 3) 捕获旧状态后写入新状态
 	AActor* OldOccupant = Occupant.Get();
 	Occupant = Actor;
 
-	// 4) 服务器应用副作用
-	//    响应式编程
+	// 4) 响应式编程：服务器应用副作用
 	ApplyOccupant(OldOccupant);
 }
 
@@ -81,8 +81,10 @@ void USingularisSeatComponent::ApplyOccupant(AActor* OldOccupant) const
 
 		// 3) 冻结角色移动
 		if (const ACharacter* Character = Cast<ACharacter>(Occupant.Get()))
+		{
 			if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
 				Movement->DisableMovement();
+		}
 
 		// 4) 附加 - 根据挂载点确定附加父级和插槽
 		const FAttachmentTransformRules AttachmentRules(EAttachmentRule::SnapToTarget, true);
@@ -128,8 +130,10 @@ void USingularisSeatComponent::ApplyOccupant(AActor* OldOccupant) const
 
 		// 4) 恢复角色移动
 		if (const ACharacter* Character = Cast<ACharacter>(OldOccupant))
+		{
 			if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
 				Movement->SetMovementMode(MOVE_Walking);
+		}
 
 		// 5) 广播离座事件
 		OnSeatVacated.Broadcast(OldOccupant);
