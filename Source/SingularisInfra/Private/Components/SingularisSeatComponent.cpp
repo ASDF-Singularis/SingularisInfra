@@ -20,9 +20,12 @@ void USingularisSeatComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// 1) 缓存挂载点
+	// 1) 缓存挂载点与退出点
 	if (AActor* Owner = GetOwner())
+	{
 		CachedMountPoint = Cast<USceneComponent>(MountPoint.GetComponent(Owner));
+		CachedExitPoint = Cast<USceneComponent>(ExitPoint.GetComponent(Owner));
+	}
 }
 
 void USingularisSeatComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -99,8 +102,14 @@ void USingularisSeatComponent::ApplyOccupant(AActor* OldOccupant) const
 			if (IsValid(AttachParent))
 			{
 				Occupant->AttachToComponent(AttachParent, AttachmentRules, AttachSocket);
-				// 附加后匹配挂载点相对父级的变换，使乘员精确位于挂载点标记的位置
-				Root->SetRelativeTransform(CachedMountPoint->GetRelativeTransform());
+
+				// 附加后仅匹配挂载点的位置与偏航：胶囊不支持俯仰/翻滚，
+				// 挂载点自身的旋转与缩放不写入乘员根组件
+				const FTransform MountTransform = CachedMountPoint->GetRelativeTransform();
+				Root->SetRelativeLocationAndRotation(
+					MountTransform.GetLocation(),
+					FRotator(0.0, MountTransform.Rotator().Yaw, 0.0)
+				);
 			}
 		}
 		else if (IsValid(GetOwner()) && IsValid(GetOwner()->GetRootComponent()))
@@ -120,22 +129,59 @@ void USingularisSeatComponent::ApplyOccupant(AActor* OldOccupant) const
 		USceneComponent* Root = OldOccupant->GetRootComponent();
 		if (!IsValid(Root)) return;
 
-		// 2) 分离
+		// 2) 分离，保留世界变换
 		const FDetachmentTransformRules DetachRules(EDetachmentRule::KeepWorld, true);
 		OldOccupant->DetachFromActor(DetachRules);
 
-		// 3) 恢复碰撞
+		// 3) 解析落点：优先使用退出点，未配置退出点时原地落位
+		FVector ExitLocation = OldOccupant->GetActorLocation();
+		FRotator ExitRotation = OldOccupant->GetActorRotation();
+
+		if (CachedExitPoint.IsValid())
+		{
+			ExitLocation = CachedExitPoint->GetComponentLocation();
+			ExitRotation = CachedExitPoint->GetComponentRotation();
+		}
+
+		// 4) 落位并清除残留移动状态
+		//    角色胶囊不支持俯仰/翻滚，附加期间继承的倾斜与附加前的残留速度会导致
+		//    角色倾斜离座并在碰撞体内反复寻地失败（悬浮、滑动、空中姿态）
+		if (const ACharacter* Character = Cast<ACharacter>(OldOccupant))
+		{
+			OldOccupant->SetActorLocationAndRotation(
+				ExitLocation,
+				FRotator(0.0, ExitRotation.Yaw, 0.0),
+				false,
+				nullptr,
+				ETeleportType::TeleportPhysics
+			);
+
+			if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+				Movement->StopMovementImmediately();
+		}
+		else
+		{
+			OldOccupant->SetActorLocationAndRotation(
+				ExitLocation,
+				ExitRotation,
+				false,
+				nullptr,
+				ETeleportType::TeleportPhysics
+			);
+		}
+
+		// 5) 恢复碰撞
 		if (UPrimitiveComponent* PrimComp = Cast<UPrimitiveComponent>(Root))
 			PrimComp->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 
-		// 4) 恢复角色移动
+		// 6) 恢复角色移动
 		if (const ACharacter* Character = Cast<ACharacter>(OldOccupant))
 		{
 			if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
 				Movement->SetMovementMode(MOVE_Walking);
 		}
 
-		// 5) 广播离座事件
+		// 7) 广播离座事件
 		OnSeatVacated.Broadcast(OldOccupant);
 	}
 }
