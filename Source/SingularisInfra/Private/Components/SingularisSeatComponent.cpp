@@ -80,7 +80,7 @@ void USingularisSeatComponent::ApplyOccupant(AActor* OldOccupant) const
 
 		// 2) 关闭碰撞，避免乘员与载具互相推挤
 		if (UPrimitiveComponent* PrimComp = Cast<UPrimitiveComponent>(Root))
-			PrimComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			PrimComp->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
 
 		// 3) 冻结角色移动
 		if (const ACharacter* Character = Cast<ACharacter>(Occupant.Get()))
