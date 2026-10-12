@@ -78,44 +78,48 @@ void USingularisSeatComponent::ApplyOccupant(AActor* OldOccupant) const
 		USceneComponent* Root = Occupant->GetRootComponent();
 		if (!IsValid(Root)) return;
 
-		// 2) 关闭碰撞，避免乘员与载具互相推挤
-		if (UPrimitiveComponent* PrimComp = Cast<UPrimitiveComponent>(Root))
-			PrimComp->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
-
-		// 3) 冻结角色移动
+		// 2) 挂起角色移动：停止速度、清空移动模式并停用 Tick。
+		//    CMC 拥有根组件变换且强制胶囊直立（俯仰/翻滚归零），只要它仍在 Tick，
+		//    就会与附件关系逐帧对抗并被客户端预测/位置修正打断，表现为模型脱离载具与抽搐
 		if (const ACharacter* Character = Cast<ACharacter>(Occupant.Get()))
 		{
 			if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
-				Movement->DisableMovement();
-		}
-
-		// 4) 附加 - 根据挂载点确定附加父级和插槽
-		const FAttachmentTransformRules AttachmentRules(EAttachmentRule::SnapToTarget, true);
-
-		if (CachedMountPoint.IsValid())
-		{
-			// 有骨骼：挂载点挂在 SkeletalMeshComponent 的某个 Socket/Bone 上 → 乘员附加到同一骨骼
-			// 无骨骼：挂载点挂在普通 SceneComponent 上 → 乘员附加到同一父级
-			USceneComponent* AttachParent = CachedMountPoint->GetAttachParent();
-			const FName AttachSocket = CachedMountPoint->GetAttachSocketName();
-
-			if (IsValid(AttachParent))
 			{
-				Occupant->AttachToComponent(AttachParent, AttachmentRules, AttachSocket);
-
-				// 附加后仅匹配挂载点的位置与偏航：胶囊不支持俯仰/翻滚，
-				// 挂载点自身的旋转与缩放不写入乘员根组件
-				const FTransform MountTransform = CachedMountPoint->GetRelativeTransform();
-				Root->SetRelativeLocationAndRotation(
-					MountTransform.GetLocation(),
-					FRotator(0.0, MountTransform.Rotator().Yaw, 0.0)
-				);
+				Movement->StopMovementImmediately();
+				Movement->DisableMovement();
+				Movement->bIgnoreClientMovementErrorChecksAndCorrection = true;
+				Movement->SetComponentTickEnabled(false);
 			}
 		}
-		else if (IsValid(GetOwner()) && IsValid(GetOwner()->GetRootComponent()))
+
+		// 3) 完全关闭碰撞：QueryOnly 仍参与查询，会与载具互相阻断并诱发抖动与穿模
+		if (UPrimitiveComponent* PrimComp = Cast<UPrimitiveComponent>(Root))
+			PrimComp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+		// 4) 附加到载具本体（挂载点的父级）并沿用其插槽，挂载点仅作为定位标记：
+		//    乘员相对插槽的变换与挂载点完全一致，从而同步其全部旋转（含俯仰/翻滚），缩放保持自身值；
+		//    不焊接物理体，避免载具翻滚时与 Chaos 求解器互相拉扯
+		USceneComponent* AttachParent = CachedMountPoint.IsValid()
+			                                ? CachedMountPoint->GetAttachParent()
+			                                : IsValid(GetOwner())
+			                                ? GetOwner()->GetRootComponent()
+			                                : nullptr;
+
+		if (IsValid(AttachParent))
 		{
-			// 无挂载点时回退到附加至 Owner 根组件
-			Occupant->AttachToComponent(GetOwner()->GetRootComponent(), AttachmentRules);
+			const FName AttachSocket = CachedMountPoint.IsValid() ? CachedMountPoint->GetAttachSocketName() : NAME_None;
+			Occupant->AttachToComponent(
+				AttachParent,
+				FAttachmentTransformRules::SnapToTargetNotIncludingScale,
+				AttachSocket
+			);
+
+			// 对齐到标记：挂载点与乘员相对同一插槽，二者相对变换一致即世界位姿一致
+			if (CachedMountPoint.IsValid())
+				Root->SetRelativeLocationAndRotation(
+					CachedMountPoint->GetRelativeLocation(),
+					CachedMountPoint->GetRelativeRotation()
+				);
 		}
 
 		// 5) 广播入座事件
@@ -130,8 +134,7 @@ void USingularisSeatComponent::ApplyOccupant(AActor* OldOccupant) const
 		if (!IsValid(Root)) return;
 
 		// 2) 分离，保留世界变换
-		const FDetachmentTransformRules DetachRules(EDetachmentRule::KeepWorld, true);
-		OldOccupant->DetachFromActor(DetachRules);
+		OldOccupant->DetachFromActor(FDetachmentTransformRules(EDetachmentRule::KeepWorld, false));
 
 		// 3) 解析落点：优先使用退出点，未配置退出点时原地落位
 		FVector ExitLocation = OldOccupant->GetActorLocation();
@@ -143,42 +146,29 @@ void USingularisSeatComponent::ApplyOccupant(AActor* OldOccupant) const
 			ExitRotation = CachedExitPoint->GetComponentRotation();
 		}
 
-		// 4) 落位并清除残留移动状态
-		//    角色胶囊不支持俯仰/翻滚，附加期间继承的倾斜与附加前的残留速度会导致
-		//    角色倾斜离座并在碰撞体内反复寻地失败（悬浮、滑动、空中姿态）
-		if (const ACharacter* Character = Cast<ACharacter>(OldOccupant))
-		{
-			OldOccupant->SetActorLocationAndRotation(
-				ExitLocation,
-				FRotator(0.0, ExitRotation.Yaw, 0.0),
-				false,
-				nullptr,
-				ETeleportType::TeleportPhysics
-			);
-
-			if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
-				Movement->StopMovementImmediately();
-		}
-		else
-		{
-			OldOccupant->SetActorLocationAndRotation(
-				ExitLocation,
-				ExitRotation,
-				false,
-				nullptr,
-				ETeleportType::TeleportPhysics
-			);
-		}
+		// 4) 直立落位：胶囊无法表达俯仰/翻滚，仅保留偏航，避免倾斜落座导致寻地失败
+		OldOccupant->SetActorLocationAndRotation(
+			ExitLocation,
+			FRotator(0.0, ExitRotation.Yaw, 0.0),
+			false,
+			nullptr,
+			ETeleportType::TeleportPhysics
+		);
 
 		// 5) 恢复碰撞
 		if (UPrimitiveComponent* PrimComp = Cast<UPrimitiveComponent>(Root))
 			PrimComp->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 
-		// 6) 恢复角色移动
+		// 6) 恢复角色移动：先唤醒再置回行走模式，并清空附加期间残留的加速度与速度
 		if (const ACharacter* Character = Cast<ACharacter>(OldOccupant))
 		{
 			if (UCharacterMovementComponent* Movement = Character->GetCharacterMovement())
+			{
+				Movement->SetComponentTickEnabled(true);
+				Movement->bIgnoreClientMovementErrorChecksAndCorrection = false;
 				Movement->SetMovementMode(MOVE_Walking);
+				Movement->StopMovementImmediately();
+			}
 		}
 
 		// 7) 广播离座事件
